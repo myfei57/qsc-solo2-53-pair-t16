@@ -42,6 +42,11 @@ class CollectorMain:
         self._pressure_pa += float(delta_pa)
         return self._pressure_pa
 
+    def restore(self, pressure_pa: float) -> None:
+        """按落盘压力回读恢复集气管状态，供重启后核对。"""
+
+        self._pressure_pa = float(pressure_pa)
+
     def settled(self) -> bool:
         """压力是否已进入目标带。"""
 

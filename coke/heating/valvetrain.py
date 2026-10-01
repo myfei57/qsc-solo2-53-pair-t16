@@ -60,3 +60,11 @@ class ValveTrain:
         """返回累计换向次数。"""
 
         return self._reversals
+
+    def restore(self, *, waste_open: bool, gas_open: bool) -> None:
+        """按落盘阀位恢复阀组，两阀同开属非法状态直接拒绝。"""
+
+        if waste_open and gas_open:
+            raise InterlockError("恢复的阀位出现两阀同开，拒绝恢复", component="heating")
+        self._waste_open = bool(waste_open)
+        self._gas_open = bool(gas_open)

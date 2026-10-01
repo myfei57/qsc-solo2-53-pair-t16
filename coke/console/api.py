@@ -45,6 +45,10 @@ class Api:
         add("GET", "/api/store", self._store)
         add("GET", "/api/timeline", self._timeline)
         add("GET", "/api/journal", self._journal)
+        add("GET", "/api/recovery", lambda params, body: self._platform.recover_status())
+        add("POST", "/api/recovery/reverify", lambda params, body: self._platform.recover_reverify())
+        add("POST", "/api/recovery/resume", self._recovery_resume)
+        add("POST", "/api/recovery/rollback", lambda params, body: self._platform.recover_rollback())
         add("GET", "/api/readiness", self._readiness)
         add("POST", "/api/step", self._step)
         add("POST", "/api/charge", self._charge)
@@ -140,6 +144,9 @@ class Api:
 
     def _step(self, params: dict, body: dict) -> dict:
         return self._platform.cycle(dt=_as_float(body, "dt", 1.0))
+
+    def _recovery_resume(self, params: dict, body: dict) -> dict:
+        return self._platform.recover_resume(dt=_as_float(body, "dt", 1.0))
 
     def _charge(self, params: dict, body: dict) -> dict:
         return self._platform.charge(

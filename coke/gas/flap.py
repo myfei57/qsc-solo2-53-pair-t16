@@ -52,3 +52,18 @@ class BridgeFlap:
         """复位开阀闩锁，返回复位后的闩锁状态。"""
 
         return self._latch.reset()
+
+    def restore(
+        self,
+        *,
+        open_: bool = False,
+        latch_engaged: bool | None = None,
+        latch_cycles: int | None = None,
+    ) -> None:
+        """按落盘状态恢复翻板与闩锁，供重启后核对，不产生新的动作计数。"""
+
+        self._angle_deg = FLAP_OPEN_DEG if open_ else FLAP_CLOSED_DEG
+        self._latch.restore(
+            self._angle_deg >= FLAP_OPEN_DEG - 1e-9 if latch_engaged is None else latch_engaged,
+            cycles=latch_cycles,
+        )

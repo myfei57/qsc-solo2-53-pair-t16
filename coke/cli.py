@@ -138,6 +138,21 @@ def _cmd_reset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_recover(args: argparse.Namespace) -> int:
+    platform = _build(args)
+    if args.action == "status":
+        _dump(platform.recover_status())
+        return 0
+    if args.action == "reverify":
+        _dump(platform.recover_reverify())
+        return 0
+    if args.action == "resume":
+        _dump(platform.recover_resume(dt=args.dt))
+        return 0
+    _dump(platform.recover_rollback())
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """构造命令行解析器。"""
 
@@ -170,6 +185,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     reset = sub.add_parser("reset", help="清掉落盘的平台计数", parents=[common])
     reset.set_defaults(func=_cmd_reset)
+
+    recover = sub.add_parser("recover", help="查看并处理重启后的中断编排（按阶段判定）", parents=[common])
+    recover.add_argument(
+        "action",
+        choices=("status", "reverify", "resume", "rollback"),
+        help="status=查看判定；reverify=改参后重新核对；resume=幂等续做；rollback=退回",
+    )
+    recover.add_argument("--dt", type=float, default=1.0, help="续做推进步长（秒）")
+    recover.set_defaults(func=_cmd_recover)
     return parser
 
 

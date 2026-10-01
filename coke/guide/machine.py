@@ -80,6 +80,15 @@ class GuideCar:
         self._locked = False
         self._apron_deg = APRON_PARK_DEG
 
+    def restore(self, *, aligned: bool, locked: bool, measured_mm: float = 0.0) -> None:
+        """按落盘状态恢复导焦栅对位与锁定，供重启后续做前核对。"""
+
+        self._measured_mm = float(measured_mm)
+        self._deviation_mm = 0.0
+        self._aligned = bool(aligned)
+        self._locked = bool(locked)
+        self._apron_deg = APRON_WORK_DEG if locked else APRON_PARK_DEG
+
     def snapshot(self) -> GuideSnapshot:
         """返回拦焦车状态快照。"""
 

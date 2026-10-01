@@ -39,3 +39,8 @@ class OvenTemperature:
         """返回与目标温度的偏差。"""
 
         return self._value_c - self._limits.temp_target_c
+
+    def restore(self, temperature_c: float) -> None:
+        """按落盘回读恢复炉温，供重启后重新确认。"""
+
+        self._value_c = float(temperature_c)

@@ -83,6 +83,14 @@ class DoorCleaner:
 
         return self._door_open
 
+    def restore(self, *, door_open: bool, elapsed_s: float = 0.0, cleaned: bool = False, oven: str = "") -> None:
+        """按落盘进度量恢复炉门状态，供重启后幂等续扫前核对。"""
+
+        self._oven = oven
+        self._door_open = bool(door_open)
+        self._elapsed_s = max(0.0, min(float(elapsed_s), self._limits.clean_duration_s))
+        self._cleaned = bool(cleaned)
+
     def snapshot(self):
         """返回炉门清扫状态快照。"""
 

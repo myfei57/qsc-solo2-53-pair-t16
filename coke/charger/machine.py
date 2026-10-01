@@ -68,6 +68,17 @@ class ChargingCar:
 
         return self._fed_t >= self._limits.coal_target_t
 
+    def restore(self, *, aligned: bool = False, fed_t: float = 0.0, hopper_mm: float = 0.0) -> None:
+        """按落盘进度量恢复煤斗状态，供重启后续做（恢复前须重新核对对位）。"""
+
+        self._oven = ""
+        self._hopper_mm = float(hopper_mm)
+        self._deviation_mm = 0.0
+        self._aligned = bool(aligned)
+        self._fed_t = max(0.0, min(float(fed_t), self._limits.coal_target_t))
+        self._feeding = self._aligned and self._fed_t < self._limits.coal_target_t
+        self._coal_load_t = 0.0 if self.feed_complete() else self._limits.coal_target_t
+
     def snapshot(self) -> ChargerSnapshot:
         """返回装煤车状态快照。"""
 

@@ -60,6 +60,19 @@ class Spray:
 
         return self._elapsed_s >= self._duration_s
 
+    @property
+    def elapsed_s(self) -> float:
+        """已喷淋时长。"""
+
+        return self._elapsed_s
+
+    def restore(self, elapsed_s: float) -> None:
+        """按落盘时长恢复喷淋进度，供重启后幂等续喷。"""
+
+        self._elapsed_s = max(0.0, min(float(elapsed_s), self._duration_s))
+        self._water_m3 = self._water_flow_m3_h * self._elapsed_s / 3600.0
+        self._open = not self.complete()
+
     def water_m3(self) -> float:
         """返回累计喷水量。"""
 

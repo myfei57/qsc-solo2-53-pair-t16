@@ -103,6 +103,14 @@ class PusherMachine:
 
         return self._state == IDLE and abs(self._ram_mm - self._target_mm) < 1e-9
 
+    def restore(self, ram_mm: float, *, target_mm: float = 0.0, state: str = IDLE) -> None:
+        """按落盘杆位与目标恢复推焦杆，供重启后按进度量续推／续退。"""
+
+        state = state if state in (IDLE, EXTENDING, RETRACTING) else IDLE
+        self._ram_mm = max(0.0, min(float(ram_mm), self._limits.max_stroke_mm))
+        self._target_mm = float(target_mm)
+        self._state = state
+
     def snapshot(self) -> PusherSnapshot:
         """返回推焦机状态快照。"""
 

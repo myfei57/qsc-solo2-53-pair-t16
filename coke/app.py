@@ -39,6 +39,8 @@ from .pusher.machine import PusherMachine
 from .pusher.speed import SpeedArbiter
 from .pusher.stroke import StrokeBaseline
 from .quench.machine import QuenchCar
+from .recovery.manager import DeviceBundle, RecoveryManager
+from .recovery.progress import ProgressStore, fingerprint_config
 from .sequence import charge_oven, clean_door, push_oven, quench_oven, reverse_heating
 from .store.journal import JsonlJournal
 from .store.jsonfile import JsonStore
@@ -92,11 +94,32 @@ class Platform:
         self.damper = DustDamper(self.config.dust.damper_open_deg, self.config.dust.damper_rate_deg_per_s)
         self.schedule = DamperSchedule(self.config.dust.linkage_lag_s)
 
+        self.recovery = RecoveryManager(
+            self.config,
+            self.clock,
+            self.bus,
+            ProgressStore(store),
+            DeviceBundle(
+                charger=self.charger,
+                collector=self.collector,
+                flap=self.flap,
+                pusher=self.pusher,
+                guide=self.guide,
+                quench=self.quench_car,
+                valves=self.valves,
+                temperature=self.temperature,
+                reversal=self.reversal,
+                door=self.door,
+            ),
+            audit_replay=lambda: self.audit.replay_from_journal(limit=100_000),
+        )
+
         self._cycles = 0
         self._operations = 0
         self._lock = threading.RLock()
         self._register_namespaces()
         self._restore()
+        self._recovery_decision = self.recovery.boot_analyze()
 
     def _register_namespaces(self) -> None:
         """登记现场设备命名空间（控制台与审计共用同一套名字）。"""
@@ -222,12 +245,29 @@ class Platform:
         """装煤编排：煤斗对位 → 调压 → 开翻板 → 给煤。"""
 
         with self._lock:
+            self.recovery.guard_new_operation()
             op_id = self.ids.next()
+            tracker = self.recovery.tracker
+            tracker.start(
+                op_id,
+                "charge",
+                oven,
+                {
+                    "hopper_target_mm": hopper_target_mm,
+                    "hopper_measured_mm": hopper_measured_mm,
+                    "dt": dt,
+                },
+                fingerprint_config(self.config),
+                self.clock.now(),
+            )
             report = charge_oven(
-                self.charger, self.collector, self.flap, oven, hopper_target_mm, hopper_measured_mm, dt
+                self.charger, self.collector, self.flap, oven, hopper_target_mm, hopper_measured_mm, dt,
+                tracker=tracker,
             )
             summary = self._record_operation(op_id, "charge", report)
             summary["op_id"] = op_id
+            if report.get("ok"):
+                tracker.finish()
             self._operations += 1
             self._persist()
             return {**report, **summary}
@@ -244,11 +284,27 @@ class Platform:
         """推焦编排：导焦栅对位 → 锁定 → 推焦 → 退杆；同时触发除尘联动。"""
 
         with self._lock:
+            self.recovery.guard_new_operation()
             op_id = self.ids.next()
             target = self.stroke.baseline_mm if stroke_target_mm is None else stroke_target_mm
             self.speed.request("auto_cycle", speed_mm_s or self.config.pusher.speed_default_mm_s, priority=50)
             arbitration = self.speed.resolve()
             self.schedule.start_link(self.clock.now())
+            tracker = self.recovery.tracker
+            tracker.start(
+                op_id,
+                "push",
+                oven,
+                {
+                    "guide_target_mm": guide_target_mm,
+                    "guide_measured_mm": guide_measured_mm,
+                    "stroke_target_mm": target,
+                    "speed_mm_s": arbitration.speed_mm_s,
+                    "dt": dt,
+                },
+                fingerprint_config(self.config),
+                self.clock.now(),
+            )
             report = push_oven(
                 self.pusher,
                 self.guide,
@@ -258,12 +314,15 @@ class Platform:
                 target,
                 arbitration.speed_mm_s,
                 dt,
+                tracker=tracker,
             )
             stroke_check = self.stroke.check(self.pusher.ram_mm)
             report["speed_arbitration"] = arbitration.as_dict()
             report["stroke_check"] = stroke_check
             summary = self._record_operation(op_id, "push", report)
             summary["op_id"] = op_id
+            if report.get("ok"):
+                tracker.finish()
             self._operations += 1
             self._persist()
             return {**report, **summary}
@@ -272,11 +331,18 @@ class Platform:
         """熄焦编排：接焦 → 走行 → 喷淋。"""
 
         with self._lock:
+            self.recovery.guard_new_operation()
             op_id = self.ids.next()
-            report = quench_oven(self.quench_car, oven, dt)
+            tracker = self.recovery.tracker
+            tracker.start(
+                op_id, "quench", oven, {"dt": dt}, fingerprint_config(self.config), self.clock.now()
+            )
+            report = quench_oven(self.quench_car, oven, dt, tracker=tracker)
             report["travel_eta_s"] = self.quench_car.plan.eta_s()
             summary = self._record_operation(op_id, "quench", report)
             summary["op_id"] = op_id
+            if report.get("ok"):
+                tracker.finish()
             self._operations += 1
             self._persist()
             return {**report, **summary}
@@ -285,12 +351,26 @@ class Platform:
         """换向编排：废气阀 → 煤气阀 → 炉温确认。"""
 
         with self._lock:
+            self.recovery.guard_new_operation()
             op_id = self.ids.next()
             target_temp = self.config.heating.temp_target_c if temperature_c is None else temperature_c
-            report = reverse_heating(self.reversal, self.valves, self.temperature, oven, target_temp)
+            tracker = self.recovery.tracker
+            tracker.start(
+                op_id,
+                "reverse",
+                oven,
+                {"temperature_c": target_temp},
+                fingerprint_config(self.config),
+                self.clock.now(),
+            )
+            report = reverse_heating(
+                self.reversal, self.valves, self.temperature, oven, target_temp, tracker=tracker
+            )
             report["offset_c"] = self.temperature.offset_c()
             summary = self._record_operation(op_id, "reverse", report)
             summary["op_id"] = op_id
+            if report.get("ok"):
+                tracker.finish()
             self._operations += 1
             self._persist()
             return {**report, **summary}
@@ -299,10 +379,17 @@ class Platform:
         """炉门清扫编排：松开闩锁 → 开炉门 → 清扫 → 复位闩锁。"""
 
         with self._lock:
+            self.recovery.guard_new_operation()
             op_id = self.ids.next()
-            report = clean_door(self.door, oven, dt)
+            tracker = self.recovery.tracker
+            tracker.start(
+                op_id, "clean", oven, {"dt": dt}, fingerprint_config(self.config), self.clock.now()
+            )
+            report = clean_door(self.door, oven, dt, tracker=tracker)
             summary = self._record_operation(op_id, "clean", report)
             summary["op_id"] = op_id
+            if report.get("ok"):
+                tracker.finish()
             self._operations += 1
             self._persist()
             return {**report, **summary}
@@ -418,6 +505,37 @@ class Platform:
             return False
         return self.store.remove("platform_state")
 
+    def recover_status(self) -> dict:
+        """返回中断恢复的进度与判定，供控制台展示与审计核对。"""
+
+        with self._lock:
+            return self.recovery.status()
+
+    def recover_reverify(self) -> dict:
+        """停机改参（迁移）或现场不符后，续做前按当前参数重新核对。"""
+
+        with self._lock:
+            return self.recovery.reverify().as_dict()
+
+    def recover_resume(self, dt: float = 1.0) -> dict:
+        """按阶段判定幂等续做上次中断的编排。"""
+
+        with self._lock:
+            report = self.recovery.resume(dt=dt)
+            if report.get("ok"):
+                self._operations += 1
+                self._persist()
+            return report
+
+    def recover_rollback(self) -> dict:
+        """按阶段判定把前置阶段退回安全初始态。"""
+
+        with self._lock:
+            report = self.recovery.rollback()
+            if report.get("ok"):
+                self._persist()
+            return report
+
     def heating_snapshot(self) -> HeatingSnapshot:
         """返回加热换向状态快照。"""
 
@@ -487,6 +605,7 @@ class Platform:
             "dust_starts": self.dust.starts(),
             "audit": self.audit.summary(),
             "ids_issued": self.ids.issued(),
+            "recovery": self.recovery.status(),
         }
 
     def snapshot(self) -> dict:

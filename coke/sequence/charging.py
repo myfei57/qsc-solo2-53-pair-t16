@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from ..charger.machine import ChargingCar
 from ..gas.collector import CollectorMain
 from ..gas.flap import BridgeFlap
+
+if TYPE_CHECKING:  # 避免运行期形成恢复包对编排的反向依赖
+    from ..recovery.progress import ProgressTracker
 
 MAX_STEPS = 600
 
@@ -17,19 +22,35 @@ def charge_oven(
     hopper_target_mm: float,
     hopper_measured_mm: float,
     dt: float = 1.0,
+    tracker: "ProgressTracker | None" = None,
 ) -> dict:
     """执行一炉装煤，返回带步骤与违约项的报告。"""
 
     steps: list[dict] = []
     violations: list[str] = []
 
+    if tracker is not None:
+        tracker.enter(
+            "align",
+            state={"charger": {"aligned": False, "fed_t": 0.0, "hopper_mm": hopper_measured_mm}},
+        )
     alignment = charger.align_hopper(oven, hopper_target_mm, hopper_measured_mm)
     steps.append({"component": "charger", "action": "align_hopper", "detail": alignment.as_dict()})
     if not alignment.ok:
         violations.append("hopper_not_aligned")
+        if tracker is not None:
+            tracker.finish()
         return {"oven": oven, "ok": False, "steps": steps, "violations": violations}
 
     flap.reset_latch()
+    if tracker is not None:
+        tracker.enter(
+            "regulate",
+            state={
+                "charger": {"aligned": True, "fed_t": charger.snapshot().fed_t, "hopper_mm": charger.snapshot().hopper_measured_mm},
+                "gas": {"pressure_pa": collector.pressure_pa, "flap_open": flap.is_open(), "latch_cycles": flap.latch.cycles()},
+            },
+        )
     for _ in range(MAX_STEPS):
         if collector.settled():
             break
@@ -47,16 +68,45 @@ def charge_oven(
     )
     if not collector.settled():
         violations.append("pressure_not_settled")
+        if tracker is not None:
+            tracker.finish()
         return {"oven": oven, "ok": False, "steps": steps, "violations": violations}
 
+    if tracker is not None:
+        tracker.enter(
+            "flap",
+            state={
+                "charger": {"aligned": True, "fed_t": charger.snapshot().fed_t, "hopper_mm": charger.snapshot().hopper_measured_mm},
+                "gas": {"pressure_pa": collector.pressure_pa, "flap_open": flap.is_open(), "latch_cycles": flap.latch.cycles()},
+            },
+        )
     angle = flap.open()
     steps.append({"component": "gas", "action": "open_flap", "detail": {"angle_deg": angle}})
 
-    fed_t = 0.0
+    fed_t = charger.snapshot().fed_t
+    if tracker is not None:
+        tracker.enter(
+            "feed",
+            state={
+                "charger": {"aligned": True, "fed_t": fed_t, "hopper_mm": charger.snapshot().hopper_measured_mm},
+                "gas": {"pressure_pa": collector.pressure_pa, "flap_open": flap.is_open(), "latch_cycles": flap.latch.cycles()},
+            },
+        )
     for _ in range(MAX_STEPS):
         if charger.feed_complete():
             break
         fed_t += charger.feed(dt)
+        if tracker is not None:
+            tracker.checkpoint(
+                {
+                    "charger": {
+                        "aligned": True,
+                        "fed_t": charger.snapshot().fed_t,
+                        "hopper_mm": charger.snapshot().hopper_measured_mm,
+                    },
+                    "gas": {"pressure_pa": collector.pressure_pa, "flap_open": flap.is_open(), "latch_cycles": flap.latch.cycles()},
+                }
+            )
     steps.append(
         {
             "component": "charger",
@@ -68,6 +118,14 @@ def charge_oven(
         violations.append("feed_incomplete")
         return {"oven": oven, "ok": False, "steps": steps, "violations": violations}
 
+    if tracker is not None:
+        tracker.enter(
+            "close_flap",
+            state={
+                "charger": {"aligned": True, "fed_t": charger.snapshot().fed_t, "hopper_mm": charger.snapshot().hopper_measured_mm},
+                "gas": {"pressure_pa": collector.pressure_pa, "flap_open": flap.is_open(), "latch_cycles": flap.latch.cycles()},
+            },
+        )
     flap.close()
     steps.append({"component": "gas", "action": "close_flap", "detail": {"angle_deg": flap.angle_deg}})
     return {"oven": oven, "ok": True, "steps": steps, "violations": violations, "fed_t": fed_t}

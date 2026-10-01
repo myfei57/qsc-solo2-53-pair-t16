@@ -55,3 +55,9 @@ class DoorLatch:
         """返回闩锁压紧次数。"""
 
         return self._cycles
+
+    def restore(self, *, engaged: bool) -> None:
+        """按落盘状态恢复闩锁，不产生动作计数。"""
+
+        self._engaged = bool(engaged)
+        self._position_mm = self._travel_mm if engaged else 0.0

@@ -43,3 +43,12 @@ class FlapLatch:
         """返回闩锁复位次数。"""
 
         return self._resets
+
+    def restore(self, engaged: bool, cycles: int | None = None, resets: int | None = None) -> None:
+        """按落盘状态恢复闩锁；动作次数一并恢复，保证重启后仍认得"本炉已开过阀"。"""
+
+        self._engaged = bool(engaged)
+        if cycles is not None:
+            self._cycles = int(cycles)
+        if resets is not None:
+            self._resets = int(resets)

@@ -75,6 +75,15 @@ class QuenchCar:
         self._travelled_m = 0.0
         self._spray = Spray(self._limits.spray_duration_s, self._limits.water_flow_m3_h)
 
+    def restore(self, *, travelled_m: float, spray_elapsed_s: float = 0.0, oven: str = "") -> None:
+        """按落盘进度量恢复熄焦车走行与喷淋，供重启后续做前核对。"""
+
+        self._oven = oven
+        self._travelled_m = max(0.0, min(float(travelled_m), self._plan.distance_m))
+        # 走到塔前车上有焦；到塔后接焦标志已被走行清掉，喷淋进度由喷头持有。
+        self._loaded = not self.at_tower()
+        self._spray.restore(spray_elapsed_s)
+
     def snapshot(self) -> QuenchSnapshot:
         """返回熄焦车状态快照。"""
 
