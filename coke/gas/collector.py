@@ -46,3 +46,9 @@ class CollectorMain:
         """压力是否已进入目标带。"""
 
         return self._limits.settled(self._pressure_pa)
+
+    def restore_state(self, state: dict) -> None:
+        """按检查点重建集气管压力现场（仅供重启恢复使用，不做动作）。"""
+
+        if isinstance(state, dict) and state.get("pressure_pa") is not None:
+            self._pressure_pa = float(state["pressure_pa"])

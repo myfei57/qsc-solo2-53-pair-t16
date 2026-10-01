@@ -39,3 +39,9 @@ class OvenTemperature:
         """返回与目标温度的偏差。"""
 
         return self._value_c - self._limits.temp_target_c
+
+    def restore_state(self, state: dict) -> None:
+        """按检查点重建炉温现场（仅供重启恢复使用，不做动作）。"""
+
+        if isinstance(state, dict) and state.get("temperature_c") is not None:
+            self._value_c = float(state["temperature_c"])

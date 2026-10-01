@@ -64,3 +64,24 @@ class Spray:
         """返回累计喷水量。"""
 
         return self._water_m3
+
+    def elapsed_s(self) -> float:
+        """返回已喷淋时长。"""
+
+        return self._elapsed_s
+
+    def restore_state(self, state: dict) -> None:
+        """按检查点重建喷淋阀与计时现场（仅供重启恢复使用，不做动作）。"""
+
+        if not isinstance(state, dict):
+            return
+        elapsed = state.get("elapsed_s")
+        if elapsed is not None:
+            self._elapsed_s = min(float(elapsed), self._duration_s)
+        water = state.get("water_m3")
+        if water is not None:
+            self._water_m3 = float(water)
+        if self.complete():
+            self._open = False
+        else:
+            self._open = bool(state.get("open", False))

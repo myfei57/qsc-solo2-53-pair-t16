@@ -88,3 +88,21 @@ class QuenchCar:
             spray_complete=self._spray.complete(),
             water_m3=self._spray.water_m3(),
         )
+
+    def restore_state(self, state: dict) -> None:
+        """按检查点重建接焦、走行与喷淋现场（仅供重启恢复使用，不做动作）。"""
+
+        if not isinstance(state, dict):
+            return
+        self._oven = str(state.get("oven", ""))
+        self._travelled_m = float(state.get("travelled_m", 0.0))
+        at_tower = self.at_tower()
+        # 走行半途：仍在接焦运载状态；已到位：焦已卸在塔下。
+        self._loaded = not at_tower
+        self._spray.restore_state(
+            {
+                "open": bool(state.get("spraying", False)),
+                "elapsed_s": state.get("spray_elapsed_s"),
+                "water_m3": state.get("spray_water_m3_raw", state.get("water_m3")),
+            }
+        )

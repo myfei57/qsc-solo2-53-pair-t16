@@ -60,3 +60,12 @@ class ValveTrain:
         """返回累计换向次数。"""
 
         return self._reversals
+
+    def restore_state(self, state: dict) -> None:
+        """按检查点重建阀位现场（仅供重启恢复使用，不做动作）。"""
+
+        if not isinstance(state, dict):
+            return
+        self._waste_open = bool(state.get("waste_open", True))
+        self._gas_open = bool(state.get("gas_open", False))
+        self._reversals = int(state.get("reversals", self._reversals))

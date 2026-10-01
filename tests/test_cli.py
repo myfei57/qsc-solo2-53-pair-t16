@@ -48,3 +48,21 @@ def test_serve_with_probe(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["listening"].startswith("http://")
     assert payload["probe"]["/api/status"]["ok"] is True
+
+
+def test_recover_command_inspect_and_resume(tmp_path, capsys):
+    from coke.app import build_platform
+    from coke.clock import ManualClock
+    from coke.config import default_config
+
+    storage = str(tmp_path / "state")
+    clock = ManualClock()
+    first = build_platform(default_config(), clock=clock, storage_root=storage)
+    first.start()
+    first.crash_drill(operation="push", phase="extend")
+
+    code = main(["--storage-root", storage, "recover", "--resume"])
+    assert code == 0
+    resumed = json.loads(capsys.readouterr().out)
+    assert resumed["ok"] is True
+    assert resumed["resumed"] is True

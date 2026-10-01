@@ -88,3 +88,58 @@ def test_server_serves_real_http(platform):
     assert probe["/api/topology"]["ok"] is True
     assert probe["/api/nope"]["ok"] is False
     assert server.port == 0
+
+
+def test_api_recovery_endpoints(tmp_path, clock):
+    from coke.app import build_platform
+    from coke.config import default_config
+
+    storage = str(tmp_path / "state")
+    first = build_platform(default_config(), clock=clock, storage_root=storage)
+    first.start()
+    first.crash_drill(operation="push", phase="extend")
+
+    second = build_platform(default_config(), clock=clock, storage_root=storage)
+    api = Api(second)
+
+    status, recovery = api.handle("GET", "/api/recovery", {}, {})
+    assert status == 200
+    assert recovery["active"] is True
+    assert recovery["granularity"] == "phase"
+    assert recovery["decision"]["action"] == "resume"
+
+    status, resumed = api.handle("POST", "/api/recovery/resume", {}, {})
+    assert status == 200
+    assert resumed["ok"] is True
+    assert resumed["resumed"] is True
+
+    status, after = api.handle("GET", "/api/recovery", {}, {})
+    assert status == 200
+    assert after["active"] is False
+
+
+def test_api_recovery_manual_ack_and_abandon(tmp_path, clock):
+    from coke.app import build_platform
+    from coke.config import default_config
+
+    storage = str(tmp_path / "state")
+    config = default_config()
+    first = build_platform(config, clock=clock, storage_root=storage)
+    first.start()
+    clock.advance(config.heating.reversal_interval_s)
+    first.crash_drill(operation="reverse", phase="switch", action="close_waste_gas")
+
+    second = build_platform(config, clock=clock, storage_root=storage)
+    api = Api(second)
+
+    status, blocked = api.handle("POST", "/api/recovery/resume", {}, {})
+    assert status == 409
+    assert blocked["component"] == "recovery"
+
+    status, acked = api.handle("POST", "/api/recovery/ack", {}, {"phase": "switch"})
+    assert status == 200
+    assert acked["acked"] == "switch"
+
+    status, resumed = api.handle("POST", "/api/recovery/resume", {}, {})
+    assert status == 200
+    assert resumed["ok"] is True

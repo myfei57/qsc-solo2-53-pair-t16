@@ -64,6 +64,11 @@ class DoorCleaner:
         ratio = self._elapsed_s / self._limits.clean_duration_s
         return min(1.0, ratio)
 
+    def elapsed_s(self) -> float:
+        """返回已清扫时长。"""
+
+        return self._elapsed_s
+
     def mark_cleaned(self) -> int:
         """标记本炉清扫完成，返回累计清扫炉数。"""
 
@@ -96,4 +101,26 @@ class DoorCleaner:
             cleaned=self._cleaned,
             progress=self.progress(),
             cycles=self._cycles,
+        )
+
+    def restore_state(self, state: dict) -> None:
+        """按检查点重建炉门与清扫计时现场（仅供重启恢复使用，不做动作）。"""
+
+        if not isinstance(state, dict):
+            return
+        self._oven = str(state.get("oven", ""))
+        self._door_open = bool(state.get("door_open", False))
+        self._cleaned = bool(state.get("cleaned", False))
+        self._cycles = int(state.get("cycles", 0))
+        elapsed = state.get("elapsed_s")
+        if elapsed is not None:
+            self._elapsed_s = max(0.0, float(elapsed))
+        else:
+            self._elapsed_s = self.progress() * self._limits.clean_duration_s
+        self._latch.restore_state(
+            {
+                "engaged": state.get("latch_engaged", not self._door_open),
+                "position_mm": state.get("latch_position_mm"),
+                "cycles": state.get("latch_cycles", 0),
+            }
         )

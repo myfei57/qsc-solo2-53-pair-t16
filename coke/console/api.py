@@ -46,6 +46,12 @@ class Api:
         add("GET", "/api/timeline", self._timeline)
         add("GET", "/api/journal", self._journal)
         add("GET", "/api/readiness", self._readiness)
+        add("GET", "/api/recovery", lambda params, body: self._platform.recovery_status())
+        add("POST", "/api/recovery/resume", lambda params, body: self._platform.resume_operation())
+        add("POST", "/api/recovery/ack", self._recovery_ack)
+        add("POST", "/api/recovery/reverify", lambda params, body: self._platform.reverify_recovery())
+        add("POST", "/api/recovery/abandon", lambda params, body: self._platform.abandon_recovery())
+        add("POST", "/api/recovery/drill", self._recovery_drill)
         add("POST", "/api/step", self._step)
         add("POST", "/api/charge", self._charge)
         add("POST", "/api/push", self._push)
@@ -184,3 +190,17 @@ class Api:
 
     def _concurrency(self, params: dict, body: dict) -> dict:
         return self._platform.concurrency_probe(rounds=int(body.get("rounds", 24)))
+
+    def _recovery_ack(self, params: dict, body: dict) -> dict:
+        phase = body.get("phase")
+        return self._platform.acknowledge_recovery(None if phase is None else str(phase))
+
+    def _recovery_drill(self, params: dict, body: dict) -> dict:
+        allowed = {"phase", "action", "operation", "oven"}
+        return self._platform.crash_drill(
+            operation=str(body.get("operation", "push")),
+            oven=str(body.get("oven", "oven01")),
+            phase=str(body.get("phase", "extend")),
+            action=str(body.get("action", "extend")),
+            **{key: value for key, value in body.items() if key not in allowed},
+        )

@@ -39,7 +39,7 @@ from .pusher.machine import PusherMachine
 from .pusher.speed import SpeedArbiter
 from .pusher.stroke import StrokeBaseline
 from .quench.machine import QuenchCar
-from .sequence import charge_oven, clean_door, push_oven, quench_oven, reverse_heating
+from .recovery import CrashInjection, RecoveryBlocked, RecoveryRunner
 from .store.journal import JsonlJournal
 from .store.jsonfile import JsonStore
 from .telemetry import TrendBuffer
@@ -91,6 +91,9 @@ class Platform:
         self.dust = DustSystem()
         self.damper = DustDamper(self.config.dust.damper_open_deg, self.config.dust.damper_rate_deg_per_s)
         self.schedule = DamperSchedule(self.config.dust.linkage_lag_s)
+        self.recovery = RecoveryRunner(
+            self.config, self.clock, self.store, self.audit, self.bus, self._machines_for
+        )
 
         self._cycles = 0
         self._operations = 0
@@ -114,13 +117,28 @@ class Platform:
         ):
             self.namespaces.register(area, device, kind)
 
+    def _machines_for(self, operation: str) -> dict:
+        """按操作返回阶段函数需要的设备表（与恢复映射口径一致）。"""
+
+        if operation == "charge":
+            return {"charger": self.charger, "collector": self.collector, "flap": self.flap}
+        if operation == "push":
+            return {"pusher": self.pusher, "guide": self.guide}
+        if operation == "quench":
+            return {"quench": self.quench_car}
+        if operation == "reverse":
+            return {"reversal": self.reversal, "valves": self.valves, "temperature": self.temperature}
+        if operation == "clean":
+            return {"door": self.door}
+        raise KeyError(operation)
+
     def _restore(self) -> None:
-        """从落盘审计回放最后一次换向，恢复换向间隔计时。"""
+        """从落盘审计回放换向计时，并恢复未收尾编排的续做决定。"""
 
         try:
             records = self.audit.to_records(self.audit.replay_from_journal(limit=100_000))
         except CokeError:
-            return
+            records = []
         reversals = [item for item in records if item.action == "reverse_complete"]
         # 只接受不晚于当前时钟的回放记录；可推进时钟重置后，上一轮留下的未来
         # 时间戳属于过期状态，不能拿它把换向间隔计时顶到当前时刻之前。
@@ -130,6 +148,8 @@ class Platform:
         if isinstance(state, dict):
             self._operations = int(state.get("operations", 0))
             self._cycles = int(state.get("cycles", 0))
+        # 编排半途恢复：重建设备现场、双源核对，决定落审计但不自动续做。
+        self.recovery.restore()
 
     def _persist(self) -> None:
         """落盘平台计数，供重启后对照。"""
@@ -139,59 +159,25 @@ class Platform:
             {"operations": self._operations, "cycles": self._cycles, "unit": self.unit},
         )
 
-    def _record_operation(self, op_id: str, operation: str, report: dict) -> dict:
-        """把编排步骤逐条写审计，并记一条汇总事件。"""
+    def _settle_report(self, op_id: str, operation: str, report: dict) -> dict:
+        """把运行器报告补上操作标识、计数与汇总字段。
 
-        oven = str(report.get("oven", ""))
-        for step in report.get("steps", []):
-            detail = {
-                key: value
-                for key, value in step.get("detail", {}).items()
-                if not isinstance(value, (dict, list))
-                and key not in ("oven", "op_id", "severity", "message")
-            }
-            self.bus.publish(
-                Event.of(
-                    step["component"],
-                    step["component"],
-                    step["action"],
-                    oven=oven,
-                    op_id=op_id,
-                    severity="notice",
-                    **detail,
-                )
-            )
-        for violation in report.get("violations", []):
-            self.bus.publish(
-                Event.of(
-                    "audit",
-                    "audit",
-                    "interlock_rejected",
-                    oven=oven,
-                    op_id=op_id,
-                    severity="alarm",
-                    message=f"{operation} 被拒绝：{violation}",
-                    violation=violation,
-                )
-            )
+        步骤事件、开始/结束事件、联锁告警与续做决定都由恢复运行器发布；这里
+        只补推焦、熄焦、换向报告特有的汇总字段，并在计数落盘后返回合并报告。
+        """
+
+        violations = list(report.get("violations", []))
         summary = {
             "op_id": op_id,
             "operation": operation,
-            "oven": oven,
+            "oven": str(report.get("oven", "")),
             "ok": bool(report.get("ok")),
-            "violations": list(report.get("violations", [])),
+            "violations": violations,
+            "resumed": bool(report.get("resumed")),
         }
-        self.bus.publish(
-            Event.of(
-                "audit",
-                "audit",
-                f"{operation}_complete",
-                severity="notice" if report.get("ok") else "warning",
-                message=f"{operation} 完成" if report.get("ok") else f"{operation} 未完成",
-                **summary,
-            )
-        )
-        return summary
+        self._operations += 1
+        self._persist()
+        return {**report, **summary}
 
     def start(self) -> dict:
         """启动平台：启动除尘风机并核对拓扑。"""
@@ -219,18 +205,18 @@ class Platform:
         hopper_measured_mm: float = 0.0,
         dt: float = 1.0,
     ) -> dict:
-        """装煤编排：煤斗对位 → 调压 → 开翻板 → 给煤。"""
+        """装煤编排：煤斗对位 → 调压 → 开翻板 → 给煤（阶段级检查点）。"""
 
         with self._lock:
             op_id = self.ids.next()
-            report = charge_oven(
-                self.charger, self.collector, self.flap, oven, hopper_target_mm, hopper_measured_mm, dt
+            report = self.recovery.start(
+                op_id,
+                "charge",
+                oven,
+                {"hopper_target_mm": hopper_target_mm, "hopper_measured_mm": hopper_measured_mm},
+                dt,
             )
-            summary = self._record_operation(op_id, "charge", report)
-            summary["op_id"] = op_id
-            self._operations += 1
-            self._persist()
-            return {**report, **summary}
+            return self._settle_report(op_id, "charge", report)
 
     def push(
         self,
@@ -246,66 +232,157 @@ class Platform:
         with self._lock:
             op_id = self.ids.next()
             target = self.stroke.baseline_mm if stroke_target_mm is None else stroke_target_mm
-            self.speed.request("auto_cycle", speed_mm_s or self.config.pusher.speed_default_mm_s, priority=50)
-            arbitration = self.speed.resolve()
-            self.schedule.start_link(self.clock.now())
-            report = push_oven(
-                self.pusher,
-                self.guide,
+            speed = speed_mm_s or self.config.pusher.speed_default_mm_s
+            arbitration_box: dict = {}
+
+            def prepare() -> None:
+                self.speed.request("auto_cycle", speed, priority=50)
+                arbitration_box["outcome"] = self.speed.resolve()
+                self.schedule.start_link(self.clock.now())
+
+            report = self.recovery.start(
+                op_id,
+                "push",
                 oven,
-                guide_target_mm,
-                guide_measured_mm,
-                target,
-                arbitration.speed_mm_s,
+                {
+                    "guide_target_mm": guide_target_mm,
+                    "guide_measured_mm": guide_measured_mm,
+                    "stroke_target_mm": target,
+                    "speed_mm_s": speed,
+                },
                 dt,
+                prepare=prepare,
             )
-            stroke_check = self.stroke.check(self.pusher.ram_mm)
-            report["speed_arbitration"] = arbitration.as_dict()
-            report["stroke_check"] = stroke_check
-            summary = self._record_operation(op_id, "push", report)
-            summary["op_id"] = op_id
-            self._operations += 1
-            self._persist()
-            return {**report, **summary}
+            report["speed_arbitration"] = arbitration_box.get("outcome", self.speed.resolve()).as_dict()
+            report["stroke_check"] = self.stroke.check(self.pusher.ram_mm)
+            return self._settle_report(op_id, "push", report)
 
     def quench(self, oven: str = DEFAULT_OVEN, dt: float = 1.0) -> dict:
-        """熄焦编排：接焦 → 走行 → 喷淋。"""
+        """熄焦编排：接焦 → 走行 → 喷淋（阶段级检查点）。"""
 
         with self._lock:
             op_id = self.ids.next()
-            report = quench_oven(self.quench_car, oven, dt)
+            report = self.recovery.start(op_id, "quench", oven, {}, dt)
             report["travel_eta_s"] = self.quench_car.plan.eta_s()
-            summary = self._record_operation(op_id, "quench", report)
-            summary["op_id"] = op_id
-            self._operations += 1
-            self._persist()
-            return {**report, **summary}
+            return self._settle_report(op_id, "quench", report)
 
     def reverse(self, oven: str = DEFAULT_OVEN, temperature_c: float | None = None) -> dict:
-        """换向编排：废气阀 → 煤气阀 → 炉温确认。"""
+        """换向编排：废气阀 → 煤气阀 → 炉温确认（阀组切换需人工确认）。"""
 
         with self._lock:
             op_id = self.ids.next()
             target_temp = self.config.heating.temp_target_c if temperature_c is None else temperature_c
-            report = reverse_heating(self.reversal, self.valves, self.temperature, oven, target_temp)
+            report = self.recovery.start(
+                op_id, "reverse", oven, {"temperature_c": target_temp}, 1.0
+            )
             report["offset_c"] = self.temperature.offset_c()
-            summary = self._record_operation(op_id, "reverse", report)
-            summary["op_id"] = op_id
-            self._operations += 1
-            self._persist()
-            return {**report, **summary}
+            return self._settle_report(op_id, "reverse", report)
 
     def clean(self, oven: str = DEFAULT_OVEN, dt: float = 1.0) -> dict:
-        """炉门清扫编排：松开闩锁 → 开炉门 → 清扫 → 复位闩锁。"""
+        """炉门清扫编排：松开闩锁 → 开炉门 → 清扫 → 复位闩锁（半途回退重扫）。"""
 
         with self._lock:
             op_id = self.ids.next()
-            report = clean_door(self.door, oven, dt)
-            summary = self._record_operation(op_id, "clean", report)
-            summary["op_id"] = op_id
-            self._operations += 1
-            self._persist()
-            return {**report, **summary}
+            report = self.recovery.start(op_id, "clean", oven, {}, dt)
+            return self._settle_report(op_id, "clean", report)
+
+    def resume_operation(self) -> dict:
+        """按落审计的续做决定接着做（或先回退再重做）。"""
+
+        with self._lock:
+            progress = self.recovery.progress()
+            if progress is None:
+                raise RecoveryBlocked("没有未收尾操作")
+            op_id = progress.op_id
+            operation = progress.operation
+            report = self.recovery.resume()
+            if operation == "push":
+                report["stroke_check"] = self.stroke.check(self.pusher.ram_mm)
+            if operation == "reverse":
+                report["offset_c"] = self.temperature.offset_c()
+            if operation == "quench":
+                report["travel_eta_s"] = self.quench_car.plan.eta_s()
+            return self._settle_report(op_id, operation, report)
+
+    def acknowledge_recovery(self, phase: str | None = None) -> dict:
+        """操作工核对现场后确认危险阶段可续做。"""
+
+        with self._lock:
+            return self.recovery.ack(phase)
+
+    def reverify_recovery(self) -> dict:
+        """参数迁移后的重新核对，通过后解除迁移阻塞。"""
+
+        with self._lock:
+            return self.recovery.reverify()
+
+    def recovery_status(self) -> dict:
+        """返回续做决定与编排进度（供控制台展示与落审计核对）。"""
+
+        with self._lock:
+            return self.recovery.status()
+
+    def abandon_recovery(self) -> dict:
+        """人工核对确认后废弃未收尾操作。"""
+
+        with self._lock:
+            removed = self.recovery.clear()
+            return {"abandoned": removed}
+
+    def crash_drill(
+        self,
+        operation: str = "push",
+        oven: str = DEFAULT_OVEN,
+        phase: str = "extend",
+        action: str = "@tick",
+        **params: object,
+    ) -> dict:
+        """演练：把指定操作跑到目标阶段（步骤或循环心跳）处模拟掉电。
+
+        ``action="@tick"``（默认）表示在该阶段的循环心跳处掉电，设备会停在
+        真正的半程（如推焦杆半程、清扫进行中）；给具体动作名则在该离散步骤
+        落审计后掉电。演练在进程内完成：拦截掉电异常，保留已落盘的进度与
+        检查点，供随后构造的新平台实例验证重启恢复。
+        """
+
+        with self._lock:
+            op_id = self.ids.next()
+            if action == "@tick":
+                self.recovery.arm_tick_crash(op_id, phase)
+            else:
+                self.recovery.arm_crash(op_id, phase, action)
+            crashed: dict
+            try:
+                if operation == "push":
+                    self.recovery.start(op_id, "push", oven, {
+                        "guide_target_mm": float(params.get("guide_target_mm", 0.0)),
+                        "guide_measured_mm": float(params.get("guide_measured_mm", 0.0)),
+                        "stroke_target_mm": float(params.get("stroke_target_mm", self.stroke.baseline_mm)),
+                        "speed_mm_s": float(params.get("speed_mm_s", self.config.pusher.speed_default_mm_s)),
+                    }, 1.0)
+                elif operation == "quench":
+                    self.recovery.start(op_id, "quench", oven, {}, 1.0)
+                elif operation == "charge":
+                    self.recovery.start(op_id, "charge", oven, {
+                        "hopper_target_mm": float(params.get("hopper_target_mm", 0.0)),
+                        "hopper_measured_mm": float(params.get("hopper_measured_mm", 0.0)),
+                    }, 1.0)
+                elif operation == "clean":
+                    self.recovery.start(op_id, "clean", oven, {}, 1.0)
+                elif operation == "reverse":
+                    self.recovery.start(op_id, "reverse", oven, {
+                        "temperature_c": float(params.get(
+                            "temperature_c", self.config.heating.temp_target_c
+                        )),
+                    }, 1.0)
+                else:
+                    raise RecoveryBlocked(f"未知演练操作 {operation!r}")
+            except CrashInjection as error:
+                crashed = {"op_id": op_id, "operation": operation, "at": f"{phase}/{action}", "error": str(error)}
+            else:
+                raise RecoveryBlocked("演练注入点未触发，操作已正常跑完")
+            status = self.recovery.status()
+            return {"crashed": crashed, "recovery": status}
 
     def cycle(self, dt: float = 1.0) -> dict:
         """推进一个控制周期，返回本周期摘要。"""
@@ -412,11 +489,13 @@ class Platform:
         return record
 
     def reset_state(self) -> bool:
-        """清掉落盘的平台计数（交付前重新标定用）。"""
+        """清掉落盘的平台计数与编排进度（交付前重新标定用）。"""
 
-        if not self.store.exists("platform_state"):
-            return False
-        return self.store.remove("platform_state")
+        removed = False
+        if self.store.exists("platform_state"):
+            removed = self.store.remove("platform_state")
+        self.recovery.clear()
+        return removed
 
     def heating_snapshot(self) -> HeatingSnapshot:
         """返回加热换向状态快照。"""
@@ -485,6 +564,7 @@ class Platform:
             "heating": self.heating_snapshot().as_dict(),
             "dust": self.dust_snapshot().as_dict(),
             "dust_starts": self.dust.starts(),
+            "recovery": self.recovery.status(),
             "audit": self.audit.summary(),
             "ids_issued": self.ids.issued(),
         }

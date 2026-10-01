@@ -52,3 +52,12 @@ class BridgeFlap:
         """复位开阀闩锁，返回复位后的闩锁状态。"""
 
         return self._latch.reset()
+
+    def restore_state(self, state: dict) -> None:
+        """按检查点重建翻板与闩锁现场（仅供重启恢复使用，不做动作）。"""
+
+        if not isinstance(state, dict):
+            return
+        self._angle_deg = float(state.get("angle_deg", FLAP_CLOSED_DEG))
+        if "latch" in state and isinstance(state["latch"], dict):
+            self._latch.restore_state(state["latch"])

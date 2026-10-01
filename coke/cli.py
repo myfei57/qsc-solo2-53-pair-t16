@@ -6,6 +6,7 @@
 ``demo``    在本地跑一遍完整流程（启动 → 装煤 → 换向 → 推焦 → 熄焦 → 清扫 →
             控制周期 → 并发探测 → 行程标定），用于交付前的真实运行检查；
 ``status``  打印当前状态快照；
+``recover`` 查看重启后的续做决定，或确认/迁移复核/续做/废弃未收尾操作；
 ``config``  打印生效配置；
 ``reset``   清掉落盘的平台计数。
 """
@@ -131,6 +132,25 @@ def _cmd_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_recover(args: argparse.Namespace) -> int:
+    platform = _build(args)
+    if args.ack:
+        payload = platform.acknowledge_recovery(args.phase)
+    elif args.reverify:
+        payload = platform.reverify_recovery()
+    elif args.resume:
+        payload = platform.resume_operation()
+    elif args.abandon:
+        payload = platform.abandon_recovery()
+    else:
+        payload = platform.recovery_status()
+    _dump(payload)
+    if args.resume and not payload.get("ok", True):
+        print(f"续做未完成: {payload.get('violations')}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _cmd_reset(args: argparse.Namespace) -> int:
     platform = _build(args)
     removed = platform.reset_state()
@@ -164,6 +184,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status", help="打印状态快照", parents=[common])
     status.set_defaults(func=_cmd_status)
+
+    recover = sub.add_parser("recover", help="查看并处理重启后的未收尾操作", parents=[common])
+    group = recover.add_mutually_exclusive_group()
+    group.add_argument("--resume", action="store_true", help="按续做决定接着做")
+    group.add_argument("--ack", action="store_true", help="操作工确认危险阶段后可续做")
+    group.add_argument("--reverify", action="store_true", help="参数迁移后重新核对")
+    group.add_argument("--abandon", action="store_true", help="人工核对后废弃未收尾操作")
+    recover.add_argument("--phase", help="确认续做的阶段名（缺省取决定中的当前阶段）")
+    recover.set_defaults(func=_cmd_recover)
 
     config = sub.add_parser("config", help="打印生效配置", parents=[common])
     config.set_defaults(func=_cmd_config)

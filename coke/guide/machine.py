@@ -92,3 +92,15 @@ class GuideCar:
             locked=self._locked,
             apron_deg=self._apron_deg,
         )
+
+    def restore_state(self, state: dict) -> None:
+        """按检查点重建导焦栅现场（仅供重启恢复使用，不做动作）。"""
+
+        if not isinstance(state, dict):
+            return
+        self._oven = str(state.get("oven", ""))
+        self._measured_mm = float(state.get("measured_mm", 0.0))
+        self._deviation_mm = float(state.get("deviation_mm", 0.0))
+        self._aligned = bool(state.get("aligned", False))
+        self._locked = bool(state.get("locked", False))
+        self._apron_deg = float(state.get("apron_deg", APRON_PARK_DEG))

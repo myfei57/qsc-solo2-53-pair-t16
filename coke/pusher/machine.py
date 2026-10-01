@@ -113,3 +113,22 @@ class PusherMachine:
             committed_mm_s=self._committed_mm_s,
             strokes=self._strokes,
         )
+
+    def restore_state(self, state: dict) -> None:
+        """按检查点重建推焦杆现场（仅供重启恢复使用，不做动作）。"""
+
+        if not isinstance(state, dict):
+            return
+        ram = float(state.get("ram_mm", 0.0))
+        target = float(state.get("target_mm", 0.0))
+        self._ram_mm = ram
+        self._target_mm = target
+        saved_state = str(state.get("state", IDLE))
+        if saved_state in (EXTENDING, RETRACTING) and abs(ram - target) >= 1e-9:
+            self._state = saved_state
+        else:
+            self._state = IDLE
+        speed = state.get("committed_mm_s")
+        if speed is not None:
+            self._committed_mm_s = float(speed)
+        self._strokes = int(state.get("strokes", 0))

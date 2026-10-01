@@ -80,3 +80,17 @@ class ChargingCar:
             fed_t=self._fed_t,
             feeding=self._feeding,
         )
+
+    def restore_state(self, state: dict) -> None:
+        """按检查点重建煤斗与给煤现场（仅供重启恢复使用，不做动作）。"""
+
+        if not isinstance(state, dict):
+            return
+        self._oven = str(state.get("oven", ""))
+        self._hopper_mm = float(state.get("hopper_measured_mm", 0.0))
+        self._deviation_mm = float(state.get("deviation_mm", 0.0))
+        self._aligned = bool(state.get("aligned", False))
+        self._fed_t = float(state.get("fed_t", 0.0))
+        self._feeding = bool(state.get("feeding", False))
+        if self._fed_t >= self._limits.coal_target_t:
+            self._coal_load_t = 0.0

@@ -43,3 +43,12 @@ class FlapLatch:
         """返回闩锁复位次数。"""
 
         return self._resets
+
+    def restore_state(self, state: dict) -> None:
+        """按检查点重建闩锁现场（仅供重启恢复使用，不做动作）。"""
+
+        if not isinstance(state, dict):
+            return
+        self._engaged = bool(state.get("engaged", False))
+        self._cycles = int(state.get("cycles", self._cycles))
+        self._resets = int(state.get("resets", self._resets))
